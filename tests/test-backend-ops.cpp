@@ -10249,9 +10249,14 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_repeat(GGML_TYPE_F32, {10, 5, 4, ne3}, {1, 1, 2, 1}));
         test_cases.emplace_back(new test_repeat(GGML_TYPE_F32, {10, 5, 4, ne3}, {1, 1, 1, 2}));
         test_cases.emplace_back(new test_repeat(GGML_TYPE_F16, {10, 5, 4, ne3}, {2, 1, 1, 1}));
-        test_cases.emplace_back(new test_repeat(GGML_TYPE_I32, {10, 5, 4, ne3}, {2, 1, 1, 1}));
-        test_cases.emplace_back(new test_repeat(GGML_TYPE_I16, {10, 5, 4, ne3}, {1, 1, 1, 2}));
-        test_cases.emplace_back(new test_repeat(GGML_TYPE_BF16, {10, 5, 4, ne3}, {2, 1, 1, 1}));
+        // backends may handle the non-f32 types on a separate path, so cover every axis there as well
+        for (ggml_type type : {GGML_TYPE_BF16, GGML_TYPE_I32, GGML_TYPE_I16}) {
+            test_cases.emplace_back(new test_repeat(type, {10, 5, 4, ne3}, {2, 1, 1, 1}));
+            test_cases.emplace_back(new test_repeat(type, {10, 5, 4, ne3}, {1, 2, 1, 1}));
+            test_cases.emplace_back(new test_repeat(type, {10, 5, 4, ne3}, {1, 1, 2, 1}));
+            test_cases.emplace_back(new test_repeat(type, {10, 5, 4, ne3}, {1, 1, 1, 2}));
+            test_cases.emplace_back(new test_repeat(type, {10, 5, 4, ne3}, {2, 2, 2, 2}));
+        }
     }
 
     for (bool view : {false, true}) {

@@ -5741,9 +5741,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return true;
         case GGML_OP_REPEAT:
             {
-                // the CUDA REPEAT path only implements F32/F16; other types assert at runtime
+                // F32/F16/BF16 use the float broadcast path, the integer types are copied as untyped words
                 ggml_type src0_type = op->src[0]->type;
-                return src0_type == GGML_TYPE_F32 || src0_type == GGML_TYPE_F16;
+                return op->type == src0_type &&
+                       (src0_type == GGML_TYPE_F32  || src0_type == GGML_TYPE_F16 ||
+                        src0_type == GGML_TYPE_BF16 || src0_type == GGML_TYPE_I32 ||
+                        src0_type == GGML_TYPE_I16);
             }
         case GGML_OP_REPEAT_BACK:
                 return op->type == GGML_TYPE_F32 && (op->src[0]->ne[2]*op->src[0]->ne[3]) <= (1 << 15);

@@ -435,8 +435,111 @@ static void ggml_cuda_op_bin_bcast(
     }
 }
 
+// REPEAT only moves data, so the integer types that the float broadcast path above
+// cannot handle are copied as untyped words of the same size as the element. This
+// relies on the natural alignment that ggml guarantees for tensor data.
+template <typename T>
+static __global__ void k_repeat_words(const char *   src,
+                                      char *         dst,
+                                      const uint3    ne0,
+                                      const uint3    ne1,
+                                      const uint3    ne2,
+                                      const uint32_t ne3,
+                                      const uint3    prod_012,
+                                      const uint3    prod_01,
+                                      const uint3    ne00,
+                                      const uint3    ne01,
+                                      const uint3    ne02,
+                                      const uint3    ne03,
+                                      const size_t   nb00,
+                                      const size_t   nb01,
+                                      const size_t   nb02,
+                                      const size_t   nb03,
+                                      const size_t   nb0,
+                                      const size_t   nb1,
+                                      const size_t   nb2,
+                                      const size_t   nb3) {
+    const uint32_t i = blockDim.x*blockIdx.x + threadIdx.x;
+
+    const uint32_t i3 = fastdiv(i, prod_012);
+    const uint32_t i2 = fastdiv(i - i3*prod_012.z, prod_01);
+    const uint32_t i1 = fastdiv(i - i3*prod_012.z - i2*prod_01.z, ne0);
+    const uint32_t i0 = i - i3*prod_012.z - i2*prod_01.z - i1*ne0.z;
+
+    if (i0 >= ne0.z || i1 >= ne1.z || i2 >= ne2.z || i3 >= ne3) {
+        return;
+    }
+
+    const char * src_ptr = src + fastmodulo(i3, ne03)*nb03 + fastmodulo(i2, ne02)*nb02 +
+                                 fastmodulo(i1, ne01)*nb01 + fastmodulo(i0, ne00)*nb00;
+    char *       dst_ptr = dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0;
+
+    ggml_cuda_pdl_sync();
+
+    *(T *) dst_ptr = *(const T *) src_ptr;
+}
+
+template <typename T>
+static void repeat_words_cuda(const ggml_tensor * src0, ggml_tensor * dst, cudaStream_t stream) {
+    GGML_ASSERT(src0->type == dst->type);
+    GGML_ASSERT(ggml_can_repeat(src0, dst));
+    GGML_ASSERT(ggml_blck_size(src0->type) == 1 && ggml_type_size(src0->type) == sizeof(T));
+
+    GGML_TENSOR_UNARY_OP_LOCALS;
+
+    // the kernel copies whole elements, so every stride must keep them naturally aligned
+    GGML_ASSERT(nb00 % sizeof(T) == 0);
+    GGML_ASSERT(nb01 % sizeof(T) == 0);
+    GGML_ASSERT(nb02 % sizeof(T) == 0);
+    GGML_ASSERT(nb03 % sizeof(T) == 0);
+
+    const int64_t n_elements = ne0*ne1*ne2*ne3;
+    const int64_t block_num  = (n_elements + CUDA_REPEAT_BLOCK_SIZE - 1) / CUDA_REPEAT_BLOCK_SIZE;
+
+    GGML_ASSERT(block_num*CUDA_REPEAT_BLOCK_SIZE <= std::numeric_limits<uint32_t>::max());
+    GGML_ASSERT(ne0*ne1                          <= std::numeric_limits<uint32_t>::max());
+    GGML_ASSERT(ne0*ne1*ne2                      <= std::numeric_limits<uint32_t>::max());
+
+    const uint3 ne0_fastdiv  = init_fastdiv_values((uint32_t) ne0);
+    const uint3 ne1_fastdiv  = init_fastdiv_values((uint32_t) ne1);
+    const uint3 ne2_fastdiv  = init_fastdiv_values((uint32_t) ne2);
+    const uint3 prod_012     = init_fastdiv_values((uint32_t) (ne0*ne1*ne2));
+    const uint3 prod_01      = init_fastdiv_values((uint32_t) (ne0*ne1));
+    const uint3 ne00_fastdiv = init_fastdiv_values((uint32_t) ne00);
+    const uint3 ne01_fastdiv = init_fastdiv_values((uint32_t) ne01);
+    const uint3 ne02_fastdiv = init_fastdiv_values((uint32_t) ne02);
+    const uint3 ne03_fastdiv = init_fastdiv_values((uint32_t) ne03);
+
+    const char * src0_d = (const char *) src0->data;
+    char *       dst_d  = (char       *) dst->data;
+
+    const ggml_cuda_kernel_launch_params launch_params =
+        ggml_cuda_kernel_launch_params((dim3) block_num, CUDA_REPEAT_BLOCK_SIZE, 0, stream);
+
+    ggml_cuda_kernel_launch(k_repeat_words<T>, launch_params, src0_d, dst_d,
+        ne0_fastdiv, ne1_fastdiv, ne2_fastdiv, (uint32_t) ne3, prod_012, prod_01,
+        ne00_fastdiv, ne01_fastdiv, ne02_fastdiv, ne03_fastdiv,
+        nb00, nb01, nb02, nb03, nb0, nb1, nb2, nb3);
+}
+
 void ggml_cuda_op_repeat(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
-    ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_repeat, 0>>(dst, dst->src[0], dst, nullptr, dst->src[0]->data, dst->data, ctx.stream());
+    const ggml_tensor * src0 = dst->src[0];
+
+    switch (src0->type) {
+        case GGML_TYPE_I32:
+            repeat_words_cuda<int32_t>(src0, dst, ctx.stream());
+            break;
+        case GGML_TYPE_I16:
+            repeat_words_cuda<int16_t>(src0, dst, ctx.stream());
+            break;
+        case GGML_TYPE_F32:
+        case GGML_TYPE_F16:
+        case GGML_TYPE_BF16:
+            ggml_cuda_op_bin_bcast<bin_bcast_cuda<op_repeat, 0>>(dst, src0, dst, nullptr, src0->data, dst->data, ctx.stream());
+            break;
+        default:
+            GGML_ABORT("%s: unsupported type %s", __func__, ggml_type_name(src0->type));
+    }
 }
 
 void ggml_cuda_op_add(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

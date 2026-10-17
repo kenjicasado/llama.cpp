@@ -1,5 +1,7 @@
 #include "common.cuh"
 
+#define CUDA_REPEAT_BLOCK_SIZE 256
+
 void ggml_cuda_op_repeat(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_add(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
 void ggml_cuda_op_sub(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
